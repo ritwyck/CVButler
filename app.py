@@ -12,11 +12,9 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import tempfile
 import os
-
-#!! export data to pdf.
-#!! parse response to streamlit output.
-#!! click on resume candidate number to show non-anonymized version.
-
+from fpdf import FPDF
+import datetime
+import io
 
 #! gemma3 model is being used here, the best that my hardware could support.
 #! attempted using larger models but ran into issues.
@@ -24,9 +22,8 @@ import os
 #! • https://www.youtube.com/watch?v=bp2eev21Qfo - this was to understand how models are set up locally and called via API.
 #! • https://www.youtube.com/watch?v=EECUXqFrwbc&list=WL&index=2 - this was to understand how to structure the solution.
 #! naturally a cloud based gemini api integrated solution would be faster and more powerful, but a local system provides more security.
-
-
 #! loading sbert model for similarity scoring. plan to use this to add some quantitatively support the decision making of the llm.
+
 
 @st.cache_resource
 def load_sbert_model():
@@ -253,8 +250,7 @@ if job_file:
 #! introduced batch processing to make the ux smoother and converted resume to txt as well.
 
 resume_files = st.file_uploader(
-    "Upload Resumes", type=["pdf", "docx"], accept_multiple_files=True
-)
+    "Upload Resumes", type=["pdf", "docx"], accept_multiple_files=True)
 
 
 def process_resume(resume, candidate_id):
@@ -289,11 +285,13 @@ if resume_files:
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    # Initialize session state if not exists
+    # Initialize session state with candidate IDs as keys
     if "anonymized_resumes" not in st.session_state:
         st.session_state["anonymized_resumes"] = {}
     if "original_resumes" not in st.session_state:
         st.session_state["original_resumes"] = {}
+    if "resume_names" not in st.session_state:
+        st.session_state["resume_names"] = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
@@ -304,21 +302,22 @@ if resume_files:
 
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             resume_name, anonymized_text, original_text = future.result()
+            # Get the candidate ID for this resume
+            candidate_id = f"Candidate{i+1:03d}"
 
-            st.session_state["anonymized_resumes"][resume_name] = anonymized_text
-            st.session_state["original_resumes"][resume_name] = original_text
+            # Store with candidate ID as key
+            st.session_state["anonymized_resumes"][candidate_id] = anonymized_text
+            st.session_state["original_resumes"][candidate_id] = original_text
+            st.session_state["resume_names"][candidate_id] = resume_name
 
             progress = (i + 1) / len(resume_files)
             progress_bar.progress(progress)
             status_text.text(f"Processing resumes: {i+1}/{len(resume_files)}")
 
-    # Clear progress indicators
     progress_bar.empty()
     status_text.empty()
 
-    # Compute similarity scores if job description is available and model is loaded
     if "job_text_concise" in st.session_state and sbert_model:
-        # Only compute if we don't have similarities or if resumes have changed
         if "resume_similarities" not in st.session_state or len(st.session_state["resume_similarities"]) != len(st.session_state["anonymized_resumes"]):
             with st.spinner("Computing similarity scores..."):
                 similarities = compute_all_similarities(
@@ -329,6 +328,25 @@ if resume_files:
 
     st.text("All Resumes processed.")
 
+
+# Display resumes with candidate numbers and expandable sections
+if "anonymized_resumes" in st.session_state and st.session_state["anonymized_resumes"]:
+    st.subheader("Uploaded Resumes")
+
+    for candidate_id in sorted(st.session_state["anonymized_resumes"].keys()):
+        resume_name = st.session_state["resume_names"][candidate_id]
+        similarity_score = st.session_state.get(
+            "resume_similarities", {}).get(candidate_id, 0)
+
+        with st.expander(f"{candidate_id} - {resume_name} (Similarity: {similarity_score:.2f})"):
+            # Show anonymized version by default
+            st.write("**Anonymized Version:**")
+            st.write(st.session_state["anonymized_resumes"][candidate_id])
+
+            # Add button to show non-anonymized version
+            if st.button(f"Show Non-Anonymized Version for {candidate_id}"):
+                st.write("**Non-Anonymized Version:**")
+                st.write(st.session_state["original_resumes"][candidate_id])
 
 #! the solution allows for multiple types of analysis along with a custom prompt option that the user can input.
 #! the prompts would be made more specialized when setting this up for the company.
@@ -343,6 +361,8 @@ prompt_options = {
         "- Seniority level\n"
         "- Qualifications (degrees, certifications, languages)\n"
         "Provide bullet summary for the three best candidates. Rank from best to worst."
+        "Refer to candidates by their respective candidate ID (e.g., Candidate001, Candidate002)."
+
     ),
 
     "Demonstrated Impact and Outcomes": (
@@ -350,6 +370,8 @@ prompt_options = {
         "- Measurable results (cost savings, revenue, efficiency, project success)\n"
         "- Career progression, responsibilities, promotions\n"
         "Provide brief summary for the three best candidates. Rank by impact."
+        "Refer to candidates by their respective candidate ID (e.g., Candidate001, Candidate002)."
+
     ),
 
     "Overall Fit": (
@@ -361,9 +383,51 @@ prompt_options = {
         "- Practical fit (values, work style, stability)\n"
         "For each candidate: 2-3 sentences on suitability (strengths/weaknesses).\n"
         "Rank the three best candidates, with one-sentence rationale per ranking and 2 interview questions per candidate"
-    )
+        "Refer to candidates by their respective candidate ID (e.g., Candidate001, Candidate002)."
 
+    )
 }
+
+#! function to create pdf from analysis result to speed up the process for the recruiter.
+
+
+def create_analysis_pdf(analysis_type, result, job_context=None, resume_similarities=None):
+    """Create a PDF from the analysis result."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+
+    pdf.set_font_size(16)
+    pdf.cell(0, 10, f"CV Analysis Report: {analysis_type}", ln=True, align='C')
+    pdf.ln(10)
+
+    pdf.set_font_size(10)
+    pdf.cell(
+        0, 10, f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+    pdf.ln(10)
+
+    if job_context:
+        pdf.set_font_size(12)
+        pdf.cell(0, 10, "Job Description Summary:", ln=True)
+        pdf.set_font_size(10)
+        pdf.multi_cell(0, 10, job_context)
+        pdf.ln(10)
+
+    if resume_similarities:
+        pdf.set_font_size(12)
+        pdf.cell(0, 10, "Similarity Scores:", ln=True)
+        pdf.set_font_size(10)
+        for name, score in sorted(resume_similarities.items(), key=lambda x: x[1], reverse=True):
+            pdf.cell(0, 10, f"{name}: {score:.2f}", ln=True)
+        pdf.ln(10)
+
+    pdf.set_font_size(12)
+    pdf.cell(0, 10, "Analysis Result:", ln=True)
+    pdf.set_font_size(10)
+    pdf.multi_cell(0, 10, result)
+
+    return pdf
+
 
 for keyword, full_prompt_text in prompt_options.items():
     if st.button(f"{keyword}"):
@@ -389,8 +453,28 @@ for keyword, full_prompt_text in prompt_options.items():
                     f"Instruction:\n{full_prompt_text}"
                 )
                 final_result = call_ollama(full_prompt)
+
                 st.text_area(f"{keyword} Analysis Result",
                              value=final_result, height=300)
+
+                pdf = create_analysis_pdf(
+                    keyword,
+                    final_result,
+                    st.session_state.get("job_context"),
+                    st.session_state.get("resume_similarities")
+                )
+
+                pdf_buffer = io.BytesIO()
+                pdf.output(pdf_buffer)
+                pdf_data = pdf_buffer.getvalue()
+
+                st.download_button(
+                    label=f"Download {keyword} Analysis as PDF",
+                    data=pdf_data,
+                    file_name=f"cv_analysis_{keyword.lower().replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf"
+                )
+
 
 #! custom prompt section.
 #! giving the correct context to the model with the job description and resumes.

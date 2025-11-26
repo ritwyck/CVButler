@@ -27,41 +27,61 @@ CVButler follows a multi-layered architecture designed for scalability, privacy,
 ### Model Architecture
 
 ```
-[User Interface - Streamlit]
-         │
-    ┌────▼────────────┐
-    │ File Processing │ <── Uploads (Job Desc + Resumes)
-    └────┬────────────┘
-         │
-    ┌────▼────────────┐      ┌───────────────── ┐
-    │ Text Extraction │ ──►  │ Job Preprocessing│
-    │ (PDF/DOCX/HTML) │      │ (Concise format) │
-    └────┬────────────┘      └────┬──────────── ┘
-         │                        │
-         └──────► [Gemini API]   ─┼───► Job Summary
-                     │            │   (Structured analysis)
-                     │            │
-Prompt Isolation     │            │
- for fairness        │            ▼
-                     │     ┌─────────────────┐
-                     │     │ Resume          │
-                     │     │ Anonymization   │
-                     │     │ (GDPR compliant)│
-                     │     └────┬────────────┘
-                     │          │
-                     └──────────┼───► [Anonymized Data]
+┌─────────────────┐
+│   User Interface │
+│    (Streamlit)   │
+└─────────┬───────┘
+          │
+          ▼
+┌─────────────────┐           ┌─────────────────┐
+│ File Uploads    │ ◄─────────┤ Job Description │
+│ - Resume PDFs   │           │ - HTML/PDF      │
+│ - Job Desc      │           └─────────────────┘
+└─────────┬───────┘                   │
+          │                           ▼
+          │               ┌─────────────────┐
+          │               │ Job Preprocessing│
+          │               │ - Text cleaning  │
+          │               │ - Conciseness    │
+          │               └─────────────────┘
+          │                           │
+          └───────► [AI Models] ──────┤
+                      ├─ Gemini API (Primary)
+                      ├─ Ollama Gemma3
                                 │
-                    ┌───────────▼───────────┐
-                    │ AI Analysis Layer     │
-                    │ ├─ Gemini API (Cloud) │
-                    │ ├─ Ollama Gemma3 (Local)
-                    └───────────┬───────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │ Report Generation     │
-                    │ ├─ Text Results       │
-                    │ └─ PDF Export         │
-                    └───────────────────────┘
+                ┌───────────────┼───────────────┐
+                │                               │
+                ▼                               ▼
+     ┌─────────────────┐             ┌─────────────────┐
+     │ Resume Processing│            │ Job Analysis &  │
+     │ - PDF/DOCX       │            │   Summary       │
+     │ - Text extraction│            │ - Responsibilities│
+     └─────────┬───────┘             │ - Skills Required │
+                │                    └─────────────────┘
+                │                              │
+                │                              │
+                ▼                              │
+     ┌─────────────────┐                       │
+     │ Anonymization   │                       │
+     │ - Remove PII    │                       │
+     │ - GDPR compliant│                       │
+     └─────────┬───────┘                       │
+               │                               │
+               ▼        ◄──────────────────────│
+     ┌─────────────────┐
+     │ Candidate       │
+     │ Evaluation      │
+     │ - Fit analysis  │
+     │ - Ranking       │
+     │ - Interview Qs  │
+     └─────────┬───────┘
+                │
+                ▼
+     ┌─────────────────┐
+     │ Report Generation│
+     │ - Text results   │
+     │ - PDF export     │
+     └─────────────────┘
 ```
 
 ## How to Run the App

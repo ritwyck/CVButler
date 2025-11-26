@@ -1,4 +1,6 @@
 
+from dotenv import load_dotenv
+
 load_dotenv()
 
 #! gemma3 model is being used here, the best that my hardware could support.

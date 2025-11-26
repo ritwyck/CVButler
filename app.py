@@ -1,5 +1,28 @@
-
+import streamlit as st
+from pathlib import Path
+from docx import Document
+import pypandoc
+import requests
+from bs4 import BeautifulSoup
+import concurrent.futures
+from tqdm import tqdm
+import pdfplumber
+import re
+import tempfile
+from fpdf import FPDF
+import datetime
+import io
+import google.generativeai as genai
 from dotenv import load_dotenv
+
+import os
+import sys
+
+if os.environ.get('ENVIRONMENT') == 'production':
+
+    st.set_option('server.headless', True)
+    st.set_option('server.port', int(os.environ.get('PORT', 8501)))
+    st.set_option('server.address', '0.0.0.0')
 
 load_dotenv()
 

@@ -1,0 +1,10 @@
+streamlit>=1.28.0
+pdfplumber
+python-docx
+pypandoc
+beautifulsoup4
+tqdm
+fpdf2
+google-generativeai
+python-dotenv
+requests

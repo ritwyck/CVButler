@@ -8,13 +8,14 @@ from bs4 import BeautifulSoup
 import concurrent.futures
 from tqdm import tqdm
 import re
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 import tempfile
 import os
 from fpdf import FPDF
 import datetime
 import io
+import google.generativeai as genai
+from dotenv import load_dotenv
+
 
 #! gemma3 model is being used here, the best that my hardware could support.
 #! attempted using larger models but ran into issues.
@@ -25,16 +26,6 @@ import io
 #! loading sbert model for similarity scoring. plan to use this to add some quantitatively support the decision making of the llm.
 
 
-@st.cache_resource
-def load_sbert_model():
-    try:
-        return SentenceTransformer('all-MiniLM-L6-v2')
-    except Exception as e:
-        st.error(f"Error loading SBERT model: {e}")
-        return None
-
-
-sbert_model = load_sbert_model()
 
 #! model configuration for better responses.
 model_config = {
@@ -43,50 +34,56 @@ model_config = {
 }
 
 
-def compute_similarity(text1, text2):
-    if not sbert_model:
-        return 0.0
+load_dotenv()
 
+# Configure Gemini API with key from .env
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+gemini_configured = False
+
+if GOOGLE_API_KEY != "YOUR_API_KEY":
     try:
-        embeddings = sbert_model.encode([text1, text2])
-
-        similarity = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
-        return float(similarity)
+        genai.configure(api_key=GOOGLE_API_KEY)
+        # Test the configuration with a simple call
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content("Hello")
+        gemini_configured = True
     except Exception as e:
-        st.error(f"Error computing similarity: {e}")
-        return 0.0
+        st.error(f"Error configuring Gemini API: {e}")
+        gemini_configured = False
+else:
+    st.warning("Please replace 'YOUR_API_KEY' with your actual Google API key in the code.")
 
+# Keep the original Ollama function for other parts of the app
+def call_ollama(prompt, model="gemma3:4b"):
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": model_config
+    }
+    resp = requests.post("http://localhost:11434/api/generate", json=payload)
+    return resp.json().get("response", "")
 
-def compute_all_similarities(job_text, resumes_dict):
-    if not sbert_model or not job_text or not resumes_dict:
-        return {}
+# Function to call Gemini API
+def call_gemini(prompt):
+    """Call Gemini API with the given prompt and return the response"""
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        st.error(f"Error calling Gemini API: {e}")
+        return ""
 
-    similarities = {}
-
-    job_embedding = sbert_model.encode([job_text])
-
-    for resume_name, resume_text in resumes_dict.items():
-        try:
-            resume_embedding = sbert_model.encode([resume_text])
-            similarity = cosine_similarity(
-                job_embedding, resume_embedding)[0][0]
-            similarities[resume_name] = float(similarity)
-        except Exception as e:
-            st.error(f"Error processing {resume_name}: {e}")
-            similarities[resume_name] = 0.0
-
-    return similarities
 
 #! adding a pre-procesing step to make job description more concise. this should make the analysis faster by making the prompt smaller.
 #! decided against pre-processing resumes as they are generally concise already.
 #! if the pre-processing step negatively affects a candidate's evaluation, then that would be unfair.
 #! pre-processing job description would impact all candidates equally.
 
-
 def preprocess_job_text(text):
     """Preprocess job description text to make it more concise while preserving context."""
     text = ' '.join(text.split())
-
     sentences = text.split('. ')
     filtered_sentences = []
 
@@ -123,7 +120,6 @@ def preprocess_job_text(text):
             continue
 
         sentence = re.sub(r'([!?.]){2,}', r'\1', sentence)
-
         sentence = re.sub(r'^[\s\-\*•]+(\d+\.?)?\s*', '', sentence)
 
         filler_phrases = [
@@ -163,30 +159,12 @@ def preprocess_job_text(text):
             filtered_sentences.append(sentence)
 
     concise_text = '. '.join(filtered_sentences)
-
     concise_text = re.sub(r'\s+', ' ', concise_text)
     concise_text = re.sub(r'\.([A-Za-z])', r'. \1', concise_text)
 
     return concise_text
 
-
 st.title("CV Butler")
-
-
-def call_ollama(prompt, model="gemma3:4b"):
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": model_config
-    }
-    resp = requests.post("http://localhost:11434/api/generate", json=payload)
-    return resp.json().get("response", "")
-
- #! file had to be converted to .txt from html because ollama model works best with plain text input.
-    #! this also explains why the ascii encoding step was needed.
-    #! initially converted to pdf but then optimised the process.
-
 
 job_file = st.file_uploader("Upload Job Description", type=["html"])
 job_text = ""
@@ -198,8 +176,7 @@ if job_file:
     with open(job_path, "wb") as f:
         f.write(file_bytes)
 
-    text_html_clean = text_html.encode(
-        'ascii', errors='ignore').decode('utf-8')
+    text_html_clean = text_html.encode('ascii', errors='ignore').decode('utf-8')
     clean_html_path = Path("job_description_clean.html")
     with open(clean_html_path, "w", encoding="utf-8") as f:
         f.write(text_html_clean)
@@ -236,14 +213,26 @@ if job_file:
         f"1. Responsibilities: Main tasks and goals\n"
         f"2. Required Skills: Technical, analytical, interpersonal\n"
         f"3. Desired Experience: Years, industry, certifications, education\n"
-        f"Use bullet points. Paraphrase, don't copy. For candidate comparison.\n\n"
+        f"Use bullet points.\n\n"
         f"Job Description:\n{job_text_concise}"
     )
 
+    # Initialize job_summary to ensure it's always defined
+    job_summary = ""
+
     with st.spinner("Analyzing job description..."):
-        job_summary = call_ollama(job_prompt)
-        st.session_state["job_context"] = job_summary
-        st.session_state["job_text_concise"] = job_text_concise
+        # Use Gemini API instead of Ollama for job description processing
+        if gemini_configured:
+            job_summary = call_gemini(job_prompt)
+        else:
+            st.warning("Gemini API not configured. Using local model instead.")
+            
+        # If job_summary is still empty, show an error
+        if not job_summary:
+            st.error("Failed to get job summary from any model.")
+            
+    st.session_state["job_context"] = job_summary
+    st.session_state["job_text_concise"] = job_text_concise
 
     st.text("Job Description processed.")
 
@@ -252,8 +241,16 @@ if job_file:
 resume_files = st.file_uploader(
     "Upload Resumes", type=["pdf", "docx"], accept_multiple_files=True)
 
+if "temp_dir" not in st.session_state:
+    st.session_state["temp_dir"] = tempfile.mkdtemp()
 
-def process_resume(resume, candidate_id):
+def process_resume(resume, candidate_id, temp_dir):
+    # Save the original file
+    original_file_path = os.path.join(temp_dir, f"{candidate_id}_original{Path(resume.name).suffix}")
+    with open(original_file_path, "wb") as f:
+        f.write(resume.getvalue())
+    
+    # Extract text from resume
     if resume.name.endswith(".pdf"):
         text = ""
         with pdfplumber.open(resume) as pdf:
@@ -265,7 +262,8 @@ def process_resume(resume, candidate_id):
     else:
         text = ""
 
-    txt_path = Path(f"resume_{candidate_id}_original.txt")
+    # Save the extracted text to a TXT file
+    txt_path = os.path.join(temp_dir, f"resume_{candidate_id}_original.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(text)
 
@@ -276,10 +274,10 @@ def process_resume(resume, candidate_id):
         f"Output anonymized data only.\n\n"
         f"Resume:\n{text}"
     )
+    # Use Ollama for resume processing (keep local for privacy)
     anonymized_text = call_ollama(prompt)
 
-    return resume.name, anonymized_text, text
-
+    return resume.name, anonymized_text, text, original_file_path
 
 if resume_files:
     progress_bar = st.progress(0)
@@ -292,23 +290,29 @@ if resume_files:
         st.session_state["original_resumes"] = {}
     if "resume_names" not in st.session_state:
         st.session_state["resume_names"] = {}
+    if "original_file_paths" not in st.session_state:
+        st.session_state["original_file_paths"] = {}
 
+    # Get the temp_dir from session state in the main thread
+    temp_dir = st.session_state["temp_dir"]
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         for i, resume in enumerate(resume_files):
             candidate_id = f"Candidate{i+1:03d}"
+            # Pass temp_dir to the process_resume function
             futures.append(executor.submit(
-                process_resume, resume, candidate_id))
+                process_resume, resume, candidate_id, temp_dir))
 
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
-            resume_name, anonymized_text, original_text = future.result()
-            # Get the candidate ID for this resume
+            resume_name, anonymized_text, original_text, original_file_path = future.result()
             candidate_id = f"Candidate{i+1:03d}"
 
             # Store with candidate ID as key
             st.session_state["anonymized_resumes"][candidate_id] = anonymized_text
             st.session_state["original_resumes"][candidate_id] = original_text
             st.session_state["resume_names"][candidate_id] = resume_name
+            st.session_state["original_file_paths"][candidate_id] = original_file_path
 
             progress = (i + 1) / len(resume_files)
             progress_bar.progress(progress)
@@ -317,17 +321,7 @@ if resume_files:
     progress_bar.empty()
     status_text.empty()
 
-    if "job_text_concise" in st.session_state and sbert_model:
-        if "resume_similarities" not in st.session_state or len(st.session_state["resume_similarities"]) != len(st.session_state["anonymized_resumes"]):
-            with st.spinner("Computing similarity scores..."):
-                similarities = compute_all_similarities(
-                    st.session_state["job_text_concise"],
-                    st.session_state["anonymized_resumes"]
-                )
-                st.session_state["resume_similarities"] = similarities
-
     st.text("All Resumes processed.")
-
 
 # Display resumes with candidate numbers and expandable sections
 if "anonymized_resumes" in st.session_state and st.session_state["anonymized_resumes"]:
@@ -335,18 +329,29 @@ if "anonymized_resumes" in st.session_state and st.session_state["anonymized_res
 
     for candidate_id in sorted(st.session_state["anonymized_resumes"].keys()):
         resume_name = st.session_state["resume_names"][candidate_id]
-        similarity_score = st.session_state.get(
-            "resume_similarities", {}).get(candidate_id, 0)
+        
 
-        with st.expander(f"{candidate_id} - {resume_name} (Similarity: {similarity_score:.2f})"):
+        with st.expander(f"{candidate_id} - {resume_name}"):
             # Show anonymized version by default
             st.write("**Anonymized Version:**")
             st.write(st.session_state["anonymized_resumes"][candidate_id])
 
             # Add button to show non-anonymized version
             if st.button(f"Show Non-Anonymized Version for {candidate_id}"):
-                st.write("**Non-Anonymized Version:**")
-                st.write(st.session_state["original_resumes"][candidate_id])
+                # Get the original file path
+                original_file_path = st.session_state["original_file_paths"][candidate_id]
+                
+                # Read the file for download
+                with open(original_file_path, "rb") as f:
+                    file_data = f.read()
+                
+                # Create a download button for the original file
+                st.download_button(
+                    label=f"Download Original {Path(original_file_path).suffix.upper()} File",
+                    data=file_data,
+                    file_name=resume_name,
+                    mime="application/octet-stream"
+                )
 
 #! the solution allows for multiple types of analysis along with a custom prompt option that the user can input.
 #! the prompts would be made more specialized when setting this up for the company.
@@ -354,44 +359,21 @@ if "anonymized_resumes" in st.session_state and st.session_state["anonymized_res
 st.subheader("Analysis")
 
 prompt_options = {
-    "Alignment with Job Requirements": (
-        "Evaluate each candidate's job alignment:\n"
-        "- Responsibilities match\n"
-        "- Tools, technologies, domain expertise\n"
-        "- Seniority level\n"
-        "- Qualifications (degrees, certifications, languages)\n"
-        "Provide bullet summary for the three best candidates. Rank from best to worst."
-        "Refer to candidates by their respective candidate ID (e.g., Candidate001, Candidate002)."
-
-    ),
-
-    "Demonstrated Impact and Outcomes": (
-        "Assess each candidate's impact:\n"
-        "- Measurable results (cost savings, revenue, efficiency, project success)\n"
-        "- Career progression, responsibilities, promotions\n"
-        "Provide brief summary for the three best candidates. Rank by impact."
-        "Refer to candidates by their respective candidate ID (e.g., Candidate001, Candidate002)."
-
-    ),
-
+    
     "Overall Fit": (
         "Assess each candidate's overall fit:\n"
         "- Job alignment (responsibilities, tools/tech, domain, experience, qualifications)\n"
         "- Impact (achievements, career progression)\n"
-        "- Consider the Similarity score (0-1)\n"
         "- Skills (technical, soft: communication, problem-solving, ownership)\n"
         "- Practical fit (values, work style, stability)\n"
-        "For each candidate: 2-3 sentences on suitability (strengths/weaknesses).\n"
-        "Rank the three best candidates, with one-sentence rationale per ranking and 2 interview questions per candidate"
+        "Rank the three best candidates, with one-sentence rationale per ranking, 2 sentences on suitability (strengths/weaknesses) and 2 interview questions per candidate. "
         "Refer to candidates by their respective candidate ID (e.g., Candidate001, Candidate002)."
-
     )
 }
 
 #! function to create pdf from analysis result to speed up the process for the recruiter.
 
-
-def create_analysis_pdf(analysis_type, result, job_context=None, resume_similarities=None):
+def create_analysis_pdf(analysis_type, result, job_context=None):
     """Create a PDF from the analysis result."""
     pdf = FPDF()
     pdf.add_page()
@@ -413,13 +395,6 @@ def create_analysis_pdf(analysis_type, result, job_context=None, resume_similari
         pdf.multi_cell(0, 10, job_context)
         pdf.ln(10)
 
-    if resume_similarities:
-        pdf.set_font_size(12)
-        pdf.cell(0, 10, "Similarity Scores:", ln=True)
-        pdf.set_font_size(10)
-        for name, score in sorted(resume_similarities.items(), key=lambda x: x[1], reverse=True):
-            pdf.cell(0, 10, f"{name}: {score:.2f}", ln=True)
-        pdf.ln(10)
 
     pdf.set_font_size(12)
     pdf.cell(0, 10, "Analysis Result:", ln=True)
@@ -428,7 +403,6 @@ def create_analysis_pdf(analysis_type, result, job_context=None, resume_similari
 
     return pdf
 
-
 for keyword, full_prompt_text in prompt_options.items():
     if st.button(f"{keyword}"):
         if "job_context" not in st.session_state or not st.session_state["anonymized_resumes"]:
@@ -436,45 +410,41 @@ for keyword, full_prompt_text in prompt_options.items():
                 "Please upload and process both job description and resumes first.")
         else:
             with st.spinner(f"Running analysis..."):
-                if "resume_similarities" in st.session_state:
+                
                     combined_resumes_text = "\n\n".join(
-                        f"{name} (Similarity: {st.session_state['resume_similarities'].get(name, 0):.2f}):\n{text}"
-                        for name, text in st.session_state["anonymized_resumes"].items()
-                    )
-                else:
-                    combined_resumes_text = "\n\n".join(
-                        f"{name}:\n{text}"
-                        for name, text in st.session_state["anonymized_resumes"].items()
+                        f"{candidate_id}:\n{text}"
+                        for candidate_id, text in st.session_state["anonymized_resumes"].items()
                     )
 
-                full_prompt = (
+            full_prompt = (
                     f"Job Description Context:\n{st.session_state['job_context']}\n\n"
                     f"Resumes:\n{combined_resumes_text}\n\n"
                     f"Instruction:\n{full_prompt_text}"
                 )
-                final_result = call_ollama(full_prompt)
+                # Use Gemini API for analysis if configured, otherwise use Ollama
+            if gemini_configured:
+                    final_result = call_gemini(full_prompt)
+                
 
-                st.text_area(f"{keyword} Analysis Result",
+            st.text_area(f"{keyword} Analysis Result",
                              value=final_result, height=300)
 
-                pdf = create_analysis_pdf(
+            pdf = create_analysis_pdf(
                     keyword,
                     final_result,
                     st.session_state.get("job_context"),
-                    st.session_state.get("resume_similarities")
                 )
 
-                pdf_buffer = io.BytesIO()
-                pdf.output(pdf_buffer)
-                pdf_data = pdf_buffer.getvalue()
+            pdf_buffer = io.BytesIO()
+            pdf.output(pdf_buffer)
+            pdf_data = pdf_buffer.getvalue()
 
-                st.download_button(
+            st.download_button(
                     label=f"Download {keyword} Analysis as PDF",
                     data=pdf_data,
                     file_name=f"cv_analysis_{keyword.lower().replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                     mime="application/pdf"
                 )
-
 
 #! custom prompt section.
 #! giving the correct context to the model with the job description and resumes.
@@ -488,13 +458,46 @@ if st.button("Send"):
             st.warning(
                 "Please upload and process both job description and resumes first.")
         else:
-            combined_resumes_text = "\n\n".join(
-                f"{name}:\n{text}" for name, text in st.session_state["anonymized_resumes"].items()
-            )
-            full_prompt = (
+           
+                combined_resumes_text = "\n\n".join(
+                    f"{candidate_id}:\n{text}"
+                    for candidate_id, text in st.session_state["anonymized_resumes"].items()
+                )
+            
+            # Form the full prompt with job context and resumes
+        full_prompt = (
                 f"Job Description Context:\n{st.session_state['job_context']}\n\n"
                 f"Resumes:\n{combined_resumes_text}\n\n"
-                f"User Instruction:\n{custom_prompt}"
+                f"Instruction:\n{custom_prompt}"
             )
-            response = call_ollama(full_prompt)
-            st.text_area("Response", value=response, height=300)
+            
+            # Get the model response
+        with st.spinner("Generating response..."):
+                if gemini_configured:
+                    result = call_gemini(full_prompt)
+                else:
+                    result = call_ollama(full_prompt)
+            
+            # Display the result
+        st.text_area("Custom Analysis Result", value=result, height=300)
+            
+            # Create PDF download option
+        pdf = create_analysis_pdf(
+                "Custom Analysis",
+                result,
+                st.session_state.get("job_context"),
+            )
+            
+        pdf_buffer = io.BytesIO()
+        pdf.output(pdf_buffer)
+        pdf_data = pdf_buffer.getvalue()
+            
+        st.download_button(
+                label="Download Custom Analysis as PDF",
+                data=pdf_data,
+                file_name=f"custom_analysis_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf"
+            )
+
+
+

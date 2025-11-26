@@ -8,13 +8,14 @@ from bs4 import BeautifulSoup
 import concurrent.futures
 from tqdm import tqdm
 import re
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import tempfile
+import os
 
-
-#!! sbert similarity scoring for ranking.
 #!! export data to pdf.
-
-#!! click on resume to show non-anonymized version.
-#!! visualise ranking with bar chart.
+#!! parse response to streamlit output.
+#!! click on resume candidate number to show non-anonymized version.
 
 
 #! gemma3 model is being used here, the best that my hardware could support.
@@ -25,11 +26,59 @@ import re
 #! naturally a cloud based gemini api integrated solution would be faster and more powerful, but a local system provides more security.
 
 
+#! loading sbert model for similarity scoring. plan to use this to add some quantitatively support the decision making of the llm.
+
+@st.cache_resource
+def load_sbert_model():
+    try:
+        return SentenceTransformer('all-MiniLM-L6-v2')
+    except Exception as e:
+        st.error(f"Error loading SBERT model: {e}")
+        return None
+
+
+sbert_model = load_sbert_model()
+
 #! model configuration for better responses.
 model_config = {
     "temperature": 0.2,
     "repeat_penalty": 1.15
 }
+
+
+def compute_similarity(text1, text2):
+    if not sbert_model:
+        return 0.0
+
+    try:
+        embeddings = sbert_model.encode([text1, text2])
+
+        similarity = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
+        return float(similarity)
+    except Exception as e:
+        st.error(f"Error computing similarity: {e}")
+        return 0.0
+
+
+def compute_all_similarities(job_text, resumes_dict):
+    if not sbert_model or not job_text or not resumes_dict:
+        return {}
+
+    similarities = {}
+
+    job_embedding = sbert_model.encode([job_text])
+
+    for resume_name, resume_text in resumes_dict.items():
+        try:
+            resume_embedding = sbert_model.encode([resume_text])
+            similarity = cosine_similarity(
+                job_embedding, resume_embedding)[0][0]
+            similarities[resume_name] = float(similarity)
+        except Exception as e:
+            st.error(f"Error processing {resume_name}: {e}")
+            similarities[resume_name] = 0.0
+
+    return similarities
 
 #! adding a pre-procesing step to make job description more concise. this should make the analysis faster by making the prompt smaller.
 #! decided against pre-processing resumes as they are generally concise already.
@@ -171,6 +220,13 @@ if job_file:
     with open(txt_concise_path, "w", encoding="utf-8") as f:
         f.write(job_text_concise)
 
+    if "job_context" not in st.session_state and job_text.strip():
+        job_text_concise = preprocess_job_text(job_text)
+
+    txt_concise_path = Path("job_description_concise.txt")
+    with open(txt_concise_path, "w", encoding="utf-8") as f:
+        f.write(job_text_concise)
+
     #! ai generated the prompts to follow the best principles of propmt engineering.
     #! context Length: shorter prompts = faster responses. tried to make the prompt as complete as possible without making it too long.
     #! the prompt is not set up for FrieslandCampina specifically to test the job descriptions from enough real companies with mostly real resumes.
@@ -178,19 +234,19 @@ if job_file:
     #! i did it because of the uncertainty around what data the model was trained on.
     #! i wanted to make sure that the analysis did not get influenced by personal data.
 
-    if "job_context" not in st.session_state and job_text.strip():
-        job_prompt = (
-            f"Summarize this job description in three sections:\n"
-            f"1. Responsibilities: Main tasks and goals\n"
-            f"2. Required Skills: Technical, analytical, interpersonal\n"
-            f"3. Desired Experience: Years, industry, certifications, education\n"
-            f"Use bullet points. Paraphrase, don't copy. For candidate comparison.\n\n"
-            f"Job Description:\n{job_text}"
-        )
+    job_prompt = (
+        f"Summarize this job description in three sections:\n"
+        f"1. Responsibilities: Main tasks and goals\n"
+        f"2. Required Skills: Technical, analytical, interpersonal\n"
+        f"3. Desired Experience: Years, industry, certifications, education\n"
+        f"Use bullet points. Paraphrase, don't copy. For candidate comparison.\n\n"
+        f"Job Description:\n{job_text_concise}"
+    )
 
-        with st.spinner("Analyzing job description..."):
-            job_summary = call_ollama(job_prompt)
-            st.session_state["job_context"] = job_summary
+    with st.spinner("Analyzing job description..."):
+        job_summary = call_ollama(job_prompt)
+        st.session_state["job_context"] = job_summary
+        st.session_state["job_text_concise"] = job_text_concise
 
     st.text("Job Description processed.")
 
@@ -233,6 +289,7 @@ if resume_files:
     progress_bar = st.progress(0)
     status_text = st.empty()
 
+    # Initialize session state if not exists
     if "anonymized_resumes" not in st.session_state:
         st.session_state["anonymized_resumes"] = {}
     if "original_resumes" not in st.session_state:
@@ -255,8 +312,20 @@ if resume_files:
             progress_bar.progress(progress)
             status_text.text(f"Processing resumes: {i+1}/{len(resume_files)}")
 
+    # Clear progress indicators
     progress_bar.empty()
     status_text.empty()
+
+    # Compute similarity scores if job description is available and model is loaded
+    if "job_text_concise" in st.session_state and sbert_model:
+        # Only compute if we don't have similarities or if resumes have changed
+        if "resume_similarities" not in st.session_state or len(st.session_state["resume_similarities"]) != len(st.session_state["anonymized_resumes"]):
+            with st.spinner("Computing similarity scores..."):
+                similarities = compute_all_similarities(
+                    st.session_state["job_text_concise"],
+                    st.session_state["anonymized_resumes"]
+                )
+                st.session_state["resume_similarities"] = similarities
 
     st.text("All Resumes processed.")
 
@@ -283,23 +352,19 @@ prompt_options = {
         "Provide brief summary for the three best candidates. Rank by impact."
     ),
 
-    "Core Skills and Competencies": (
-        "Evaluate each candidate's skills:\n"
-        "- Hard skills (role-specific)\n"
-        "- Soft skills (communication, collaboration, stakeholder management, problem-solving, ownership)\n"
-        "Summarize skill fit for the three best candidates. Rank by skills match."
-    ),
-
     "Overall Fit": (
         "Assess each candidate's overall fit:\n"
         "- Job alignment (responsibilities, tools/tech, domain, experience, qualifications)\n"
         "- Impact (achievements, career progression)\n"
+        "- Consider the Similarity score (0-1)\n"
         "- Skills (technical, soft: communication, problem-solving, ownership)\n"
         "- Practical fit (values, work style, stability)\n"
         "For each candidate: 2-3 sentences on suitability (strengths/weaknesses).\n"
         "Rank the three best candidates, with one-sentence rationale per ranking and 2 interview questions per candidate"
     )
+
 }
+
 for keyword, full_prompt_text in prompt_options.items():
     if st.button(f"{keyword}"):
         if "job_context" not in st.session_state or not st.session_state["anonymized_resumes"]:
@@ -307,10 +372,17 @@ for keyword, full_prompt_text in prompt_options.items():
                 "Please upload and process both job description and resumes first.")
         else:
             with st.spinner(f"Running analysis..."):
+                if "resume_similarities" in st.session_state:
+                    combined_resumes_text = "\n\n".join(
+                        f"{name} (Similarity: {st.session_state['resume_similarities'].get(name, 0):.2f}):\n{text}"
+                        for name, text in st.session_state["anonymized_resumes"].items()
+                    )
+                else:
+                    combined_resumes_text = "\n\n".join(
+                        f"{name}:\n{text}"
+                        for name, text in st.session_state["anonymized_resumes"].items()
+                    )
 
-                combined_resumes_text = "\n\n".join(
-                    f"{name}:\n{text}" for name, text in st.session_state["anonymized_resumes"].items()
-                )
                 full_prompt = (
                     f"Job Description Context:\n{st.session_state['job_context']}\n\n"
                     f"Resumes:\n{combined_resumes_text}\n\n"

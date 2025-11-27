@@ -218,10 +218,10 @@ Added concurrent processing for multiple resumes using ThreadPoolExecutor to pre
 ## Areas of Improvement
 
 Add multi-language support.
-Include nested-prompting to get better responses.
-Include a toggle to allow the user decide if they wanted interview questions.
-Improve UI by integrating the text clearly.
-Utilise S-Bert model to check for similarity between job listing and resumes.
+• Include nested-prompting to get better responses.
+• Include a toggle to allow the user decide if they wanted interview questions.
+• Improve UI by integrating the text clearly - fixing formats.
+• Utilise S-Bert model to check for similarity between job listing and resumes.
 
 ## The ReadMe file was created with the help of an LLM. It was asked to analyse all the comments that explained the decision-making process and consider the technical factors. Whatever I felt was missed or not explained by the model was added by me.
 

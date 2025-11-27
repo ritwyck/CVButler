@@ -393,10 +393,10 @@ for keyword, full_prompt_text in prompt_options.items():
         else:
             with st.spinner(f"Running analysis..."):
                 # Debug: Check what's in session state
-                st.write("Debug: Job context exists:", bool(
+                st.write("Job context exists:", bool(
                     st.session_state["job_context"]))
-                st.write("Debug: Number of anonymized resumes:",
-                         len(st.session_state["anonymized_resumes"]))
+                st.write("Number of anonymized resumes:", len(
+                    st.session_state["anonymized_resumes"]))
 
                 combined_resumes_text = "\n\n".join(
                     f"{candidate_id}:\n{text}"
@@ -410,7 +410,7 @@ for keyword, full_prompt_text in prompt_options.items():
                 )
 
                 # Debug: Show the prompt being sent
-                st.write("Debug: Prompt length:", len(full_prompt))
+                st.write("Prompt length:", len(full_prompt))
 
                 if gemini_configured:
                     final_result = call_gemini(full_prompt)
@@ -418,7 +418,7 @@ for keyword, full_prompt_text in prompt_options.items():
                     # final_result = call_ollama(full_prompt)
 
                 # Debug: Show the result
-                st.write("Debug: Result length:", len(
+                st.write("Result length:", len(
                     final_result) if final_result else 0)
 
             st.text_area(f"{keyword} Analysis Result",
